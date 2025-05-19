@@ -111,51 +111,59 @@ def front_future(root: str, exch: str) -> Future:
     # fallback to first detail if all expired
     return details[0].contract
 
-# ────────────────────── connect IB ─────────────────────────
-ib = IB()
-ib.connect(IB_HOST, IB_PORT, clientId=IB_CID)
+# --- helpers ---------------------------------------------------------------
+def calc_ADV30(df: pd.DataFrame) -> float:
+    """Return 30‑day average volume or NaN if no volume column."""
+    if "volume" not in df.columns:
+        return np.nan
+    return df["volume"].tail(30).mean()
 
-rows, tickers = [], load_tickers()
-ts_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+# ────────────────────── connect IB ─────────────────────────
+def main() -> None:
+    ib = IB()
+    ib.connect(IB_HOST, IB_PORT, clientId=IB_CID)
+
+    rows, tickers = [], load_tickers()
+    ts_now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # pull SPY once for beta
-spy = Stock("SPY", "SMART", "USD")
-spy_bars = ib.reqHistoricalData(spy, "", f"{HIST_DAYS} D",
-                                "1 day", "TRADES", useRTH=True)
-spy_ret = pd.Series(dtype=float)
-if spy_bars:
-    _df = util.df(spy_bars)
-    if not _df.empty:
-        spy_ret = _df["close"].pct_change().dropna()
+    spy = Stock("SPY", "SMART", "USD")
+    spy_bars = ib.reqHistoricalData(spy, "", f"{HIST_DAYS} D",
+                                    "1 day", "TRADES", useRTH=True)
+    spy_ret = pd.Series(dtype=float)
+    if spy_bars:
+        _df = util.df(spy_bars)
+        if not _df.empty:
+            spy_ret = _df["close"].pct_change().dropna()
 
-for tk in tickers:
-    logging.info("▶ %s", tk)
-    if tk == "MOVE":
-        logging.info("Skipping option chain for MOVE index (no options).")
-        continue
-    # ----- contract selection -----
-    if tk in FUTURE_ROOTS:
-        root, exch = FUTURE_ROOTS[tk]
-        try:
-            stk = front_future(root, exch)
-        except Exception as e:
-            logging.warning("Front future lookup failed for %s: %s", tk, e)
+    for tk in tickers:
+        logging.info("▶ %s", tk)
+        if tk == "MOVE":
+            logging.info("Skipping option chain for MOVE index (no options).")
             continue
-    elif tk in SYMBOL_MAP:
-        cls, kw = SYMBOL_MAP[tk]
-        stk = cls(**kw)
-    else:
-        stk = Stock(tk, "SMART", "USD")
-    ib.qualifyContracts(stk)
-    if not stk.conId:
-        logging.warning("Could not qualify %s – skipping", tk)
-        continue
+        # ----- contract selection -----
+        if tk in FUTURE_ROOTS:
+            root, exch = FUTURE_ROOTS[tk]
+            try:
+                stk = front_future(root, exch)
+            except Exception as e:
+                logging.warning("Front future lookup failed for %s: %s", tk, e)
+                continue
+        elif tk in SYMBOL_MAP:
+            cls, kw = SYMBOL_MAP[tk]
+            stk = cls(**kw)
+        else:
+            stk = Stock(tk, "SMART", "USD")
+        ib.qualifyContracts(stk)
+        if not stk.conId:
+            logging.warning("Could not qualify %s – skipping", tk)
+            continue
 
-    bar_type = "TRADES"
-    if isinstance(stk, Index):
-        bar_type = "MIDPOINT"   # indices don’t have prints
-    if tk in {"VIX", "VVIX", "^TNX", "^TYX"}:
         bar_type = "TRADES"
+        if isinstance(stk, Index):
+            bar_type = "MIDPOINT"   # indices don’t have prints
+        if tk in {"VIX", "VVIX", "^TNX", "^TYX"}:
+            bar_type = "TRADES"
 
     try:
         bars = ib.reqHistoricalData(stk, "", f"{HIST_DAYS} D",
@@ -197,7 +205,7 @@ for tk in tickers:
     pdi = 100*plus_dm.rolling(14).sum()/tr14
     mdi = 100*minus_dm.rolling(14).sum()/tr14
     adx14 = ((pdi-mdi).abs()/(pdi+mdi)*100).rolling(14).mean().iloc[-1]
-    ADV30 = df["volume"].tail(30).mean()
+        ADV30 = calc_ADV30(df)
 
     # -------------------------------- option chain section ------------------------------
     # Only run option‑chain logic for *stock or ETF underlyings*.
@@ -332,15 +340,18 @@ for tk in tickers:
         except Exception:
             pass
 
-    rows.append(dict(timestamp=ts_now, ticker=tk,
-                     ADX=adx14, ATR=atr14,
-                     _20dma=sma20, _50dma=sma50, _200dma=sma200,
-                     IV_rank=iv_rank, RSI=rsi14,
-                     beta_SPY=beta, ADV30=ADV30,
-                     next_earnings=earn_dt, OI_near_ATM=oi_near))
+        rows.append(dict(timestamp=ts_now, ticker=tk,
+                         ADX=adx14, ATR=atr14,
+                         _20dma=sma20, _50dma=sma50, _200dma=sma200,
+                         IV_rank=iv_rank, RSI=rsi14,
+                         beta_SPY=beta, ADV30=ADV30,
+                         next_earnings=earn_dt, OI_near_ATM=oi_near))
 
-    time.sleep(0.25)
+        time.sleep(0.25)
 
-pd.DataFrame(rows).to_csv(OUTPUT_CSV,index=False)
-logging.info("Saved %d rows → %s", len(rows), OUTPUT_CSV)
-ib.disconnect()
+    pd.DataFrame(rows).to_csv(OUTPUT_CSV,index=False)
+    logging.info("Saved %d rows → %s", len(rows), OUTPUT_CSV)
+    ib.disconnect()
+
+if __name__ == "__main__":
+    main()
